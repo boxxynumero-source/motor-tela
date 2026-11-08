@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameType};
-use openh264::formats::{RgbSliceU8, YUVBuffer};
+use openh264::formats::YUVBuffer;
 use openh264::OpenH264API;
 use windows_capture::{
     capture::{Context, GraphicsCaptureApiHandler},
@@ -29,7 +29,6 @@ struct Transmissor {
     socket: Arc<UdpSocket>,
     destino: SocketAddr,
     encoder: EncSeguro,
-    rgb: Vec<u8>,
     id_quadro: u32,
     ultimo_forcado: Instant,
     ult_seg: Instant,
@@ -38,6 +37,42 @@ struct Transmissor {
     t_copia: f64,
     t_yuv: f64,
     t_cod: f64,
+}
+
+// Converte RGBA direto para YUV 4:2:0 (I420) com contas de numeros inteiros.
+// Os numeros sao os mesmos da conversao padrao BT.601 (faixa limitada).
+fn rgba_para_yuv(rgba: &[u8], largura_total: usize, w: usize, h: usize, saida: &mut [u8]) {
+    let (y_plano, resto) = saida.split_at_mut(w * h);
+    let (u_plano, v_plano) = resto.split_at_mut(w * h / 4);
+    let meia = w / 2;
+    for cy in 0..h / 2 {
+        let linha0 = (cy * 2) * largura_total * 4;
+        let linha1 = linha0 + largura_total * 4;
+        for cx in 0..meia {
+            let off = cx * 2 * 4;
+            let mut soma_r = 0i32;
+            let mut soma_g = 0i32;
+            let mut soma_b = 0i32;
+            for (dy, &linha) in [linha0, linha1].iter().enumerate() {
+                for dx in 0..2usize {
+                    let i = linha + off + dx * 4;
+                    let r = rgba[i] as i32;
+                    let g = rgba[i + 1] as i32;
+                    let b = rgba[i + 2] as i32;
+                    y_plano[(cy * 2 + dy) * w + cx * 2 + dx] =
+                        (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16) as u8;
+                    soma_r += r;
+                    soma_g += g;
+                    soma_b += b;
+                }
+            }
+            let r = soma_r / 4;
+            let g = soma_g / 4;
+            let b = soma_b / 4;
+            u_plano[cy * meia + cx] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128) as u8;
+            v_plano[cy * meia + cx] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128) as u8;
+        }
+    }
 }
 
 impl Transmissor {
@@ -67,7 +102,6 @@ impl GraphicsCaptureApiHandler for Transmissor {
             socket: cfg.socket,
             destino: cfg.destino,
             encoder: EncSeguro(encoder),
-            rgb: Vec::new(),
             id_quadro: 0,
             ultimo_forcado: Instant::now(),
             ult_seg: Instant::now(),
@@ -97,15 +131,12 @@ impl GraphicsCaptureApiHandler for Transmissor {
         if dados.len() < total_w * total_h * 4 {
             return Ok(());
         }
-
-        self.rgb.clear();
-        for y in 0..h {
-            let ini = y * total_w * 4;
-            for px in dados[ini..ini + w * 4].chunks_exact(4) {
-                self.rgb.extend_from_slice(&px[..3]);
-            }
-        }
         let t1 = Instant::now();
+
+        let mut yuv_dados = vec![0u8; w * h * 3 / 2];
+        rgba_para_yuv(&dados[..], total_w, w, h, &mut yuv_dados);
+        let yuv = YUVBuffer::from_vec(yuv_dados, w, h);
+        let t2 = Instant::now();
 
         let pedido = self.pedido_de_chave();
         if pedido || self.ultimo_forcado.elapsed() >= Duration::from_secs(2) {
@@ -113,8 +144,6 @@ impl GraphicsCaptureApiHandler for Transmissor {
             self.ultimo_forcado = Instant::now();
         }
 
-        let yuv = YUVBuffer::from_rgb_source(RgbSliceU8::new(&self.rgb, (w, h)));
-        let t2 = Instant::now();
         let stream = self
             .encoder
             .0
