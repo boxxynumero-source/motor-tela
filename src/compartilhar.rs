@@ -1,4 +1,5 @@
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use openh264::encoder::{BitRate, Encoder, EncoderConfig, FrameType};
@@ -15,6 +16,7 @@ use windows_capture::{
 const TAM_PEDACO: usize = 1200;
 
 struct Config {
+    socket: Arc<UdpSocket>,
     destino: SocketAddr,
     bps: u32,
 }
@@ -24,7 +26,7 @@ struct EncSeguro(Encoder);
 unsafe impl Send for EncSeguro {}
 
 struct Transmissor {
-    socket: UdpSocket,
+    socket: Arc<UdpSocket>,
     destino: SocketAddr,
     encoder: EncSeguro,
     rgb: Vec<u8>,
@@ -33,6 +35,9 @@ struct Transmissor {
     ult_seg: Instant,
     quadros: u32,
     bytes: u64,
+    t_copia: f64,
+    t_yuv: f64,
+    t_cod: f64,
 }
 
 impl Transmissor {
@@ -54,13 +59,12 @@ impl GraphicsCaptureApiHandler for Transmissor {
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         let cfg = ctx.flags;
-        let socket = UdpSocket::bind("0.0.0.0:0")?;
-        socket.set_nonblocking(true)?;
+        cfg.socket.set_nonblocking(true)?;
         let config = EncoderConfig::new().bitrate(BitRate::from_bps(cfg.bps));
         let encoder = Encoder::with_api_config(OpenH264API::from_source(), config)
             .map_err(|e| format!("{:?}", e))?;
         Ok(Self {
-            socket,
+            socket: cfg.socket,
             destino: cfg.destino,
             encoder: EncSeguro(encoder),
             rgb: Vec::new(),
@@ -69,6 +73,9 @@ impl GraphicsCaptureApiHandler for Transmissor {
             ult_seg: Instant::now(),
             quadros: 0,
             bytes: 0,
+            t_copia: 0.0,
+            t_yuv: 0.0,
+            t_cod: 0.0,
         })
     }
 
@@ -77,6 +84,7 @@ impl GraphicsCaptureApiHandler for Transmissor {
         frame: &mut Frame,
         _controle: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
+        let t0 = Instant::now();
         let total_w = frame.width() as usize;
         let total_h = frame.height() as usize;
         let w = total_w & !1;
@@ -97,6 +105,7 @@ impl GraphicsCaptureApiHandler for Transmissor {
                 self.rgb.extend_from_slice(&px[..3]);
             }
         }
+        let t1 = Instant::now();
 
         let pedido = self.pedido_de_chave();
         if pedido || self.ultimo_forcado.elapsed() >= Duration::from_secs(2) {
@@ -105,6 +114,7 @@ impl GraphicsCaptureApiHandler for Transmissor {
         }
 
         let yuv = YUVBuffer::from_rgb_source(RgbSliceU8::new(&self.rgb, (w, h)));
+        let t2 = Instant::now();
         let stream = self
             .encoder
             .0
@@ -112,6 +122,7 @@ impl GraphicsCaptureApiHandler for Transmissor {
             .map_err(|e| format!("{:?}", e))?;
         let chave = matches!(stream.frame_type(), FrameType::IDR | FrameType::I);
         let h264 = stream.to_vec();
+        let t3 = Instant::now();
         if h264.is_empty() {
             return Ok(());
         }
@@ -130,16 +141,26 @@ impl GraphicsCaptureApiHandler for Transmissor {
 
         self.quadros += 1;
         self.bytes += h264.len() as u64;
+        self.t_copia += (t1 - t0).as_secs_f64() * 1000.0;
+        self.t_yuv += (t2 - t1).as_secs_f64() * 1000.0;
+        self.t_cod += (t3 - t2).as_secs_f64() * 1000.0;
         if self.ult_seg.elapsed() >= Duration::from_secs(1) {
+            let n = self.quadros.max(1) as f64;
             println!(
-                "{} quadros/s, {:.1} Mbps reais, {}x{}",
+                "{} quadros/s, {:.1} Mbps reais, {}x{} | por quadro: copia {:.0} ms, yuv {:.0} ms, codif {:.0} ms",
                 self.quadros,
                 (self.bytes as f64 * 8.0) / 1_000_000.0,
                 w,
-                h
+                h,
+                self.t_copia / n,
+                self.t_yuv / n,
+                self.t_cod / n
             );
             self.quadros = 0;
             self.bytes = 0;
+            self.t_copia = 0.0;
+            self.t_yuv = 0.0;
+            self.t_cod = 0.0;
             self.ult_seg = Instant::now();
         }
         Ok(())
@@ -150,14 +171,7 @@ impl GraphicsCaptureApiHandler for Transmissor {
     }
 }
 
-pub fn executar(ip: &str, porta: &str, mbps: &str) {
-    let destino: SocketAddr = match format!("{}:{}", ip, porta).parse() {
-        Ok(d) => d,
-        Err(_) => {
-            println!("IP ou porta invalidos. Exemplo de IP: 192.168.0.10");
-            return;
-        }
-    };
+pub fn executar(socket: UdpSocket, destino: SocketAddr, mbps: &str) {
     let mbps: f64 = mbps.replace(',', ".").parse().unwrap_or(8.0);
     let bps = (mbps * 1_000_000.0) as u32;
 
@@ -167,7 +181,11 @@ pub fn executar(ip: &str, porta: &str, mbps: &str) {
         CursorCaptureSettings::Default,
         DrawBorderSettings::Default,
         ColorFormat::Rgba8,
-        Config { destino, bps },
+        Config {
+            socket: Arc::new(socket),
+            destino,
+            bps,
+        },
     );
     println!("Transmitindo para {} a {:.1} Mbps. Feche a janela para parar.", destino, mbps);
     if let Err(e) = Transmissor::start(config) {
