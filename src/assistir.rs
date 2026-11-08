@@ -15,14 +15,9 @@ struct Parcial {
     chave: bool,
 }
 
-pub fn executar(porta: &str) {
-    let socket = match UdpSocket::bind(format!("0.0.0.0:{}", porta)) {
-        Ok(s) => s,
-        Err(e) => {
-            println!("Nao consegui abrir a porta {}: {}", porta, e);
-            return;
-        }
-    };
+// `par` = endereco do outro PC quando a conexao ja foi feita pela internet.
+// Com `None` (IP direto), o programa aprende o endereco do primeiro pacote que chegar.
+pub fn executar(socket: UdpSocket, par: Option<SocketAddr>) {
     let socket_resp = socket.try_clone().expect("Falha ao clonar o socket");
 
     // Uma thread so para ler a rede, para nao perder pacotes enquanto a janela desenha.
@@ -57,13 +52,14 @@ pub fn executar(porta: &str) {
     let mut parcial: Option<Parcial> = None;
     let mut ultimo_id: Option<u32> = None;
     let mut esperando_chave = true;
-    let mut remetente: Option<SocketAddr> = None;
+    let mut remetente: Option<SocketAddr> = par;
     let mut ultimo_pedido: Option<Instant> = None;
+    let mut ult_ka = Instant::now();
     let mut ult_seg = Instant::now();
     let mut quadros_vistos = 0u32;
     let mut bytes_rec = 0u64;
 
-    println!("Esperando a transmissao na porta {}... (ESC na janela para sair)", porta);
+    println!("Esperando a transmissao... (ESC na janela para sair)");
 
     'principal: loop {
         let mut pacotes = Vec::new();
@@ -77,6 +73,10 @@ pub fn executar(porta: &str) {
         }
 
         for (dados, de) in pacotes {
+            // Conectado pela internet: ignora qualquer pacote que nao venha do outro PC.
+            if par.is_some() && Some(de) != par {
+                continue;
+            }
             remetente = Some(de);
             bytes_rec += dados.len() as u64;
             if dados.len() < 9 {
@@ -198,6 +198,14 @@ pub fn executar(porta: &str) {
                     ultimo_pedido = Some(Instant::now());
                 }
             }
+        }
+
+        // Mantem o caminho aberto no roteador de quem assiste.
+        if ult_ka.elapsed() >= Duration::from_secs(5) {
+            if let Some(dest) = remetente {
+                let _ = socket_resp.send_to(b"P", dest);
+            }
+            ult_ka = Instant::now();
         }
 
         if let Some(j) = janela.as_mut() {
