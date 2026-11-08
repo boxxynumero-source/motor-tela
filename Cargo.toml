@@ -5,5 +5,5 @@ edition = "2021"
 
 [dependencies]
 windows-capture = "=1.4.4"
-openh264 = { version = "=0.9.3", features = ["source", "encoder", "decoder"] }
+openh264 = { version = "=0.9.3", features = ["source"] }
 minifb = "=0.28.0"
