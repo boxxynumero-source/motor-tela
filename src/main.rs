@@ -1,88 +1,38 @@
-use std::time::Instant;
-use windows_capture::{
-    capture::{Context, GraphicsCaptureApiHandler},
-    encoder::{
-        AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
-        VideoSettingsSubType,
-    },
-    frame::Frame,
-    graphics_capture_api::InternalCaptureControl,
-    monitor::Monitor,
-    settings::{ColorFormat, CursorCaptureSettings, DrawBorderSettings, Settings},
-};
+mod assistir;
+mod compartilhar;
 
-struct Captura {
-    encoder: Option<VideoEncoder>,
-    inicio: Instant,
-    quadros: u32,
-}
+use std::io::{self, Write};
 
-impl GraphicsCaptureApiHandler for Captura {
-    type Flags = ();
-    type Error = Box<dyn std::error::Error + Send + Sync>;
-
-    fn new(_ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        Ok(Self {
-            encoder: None,
-            inicio: Instant::now(),
-            quadros: 0,
-        })
-    }
-
-    fn on_frame_arrived(
-        &mut self,
-        frame: &mut Frame,
-        controle: InternalCaptureControl,
-    ) -> Result<(), Self::Error> {
-        // O codificador é criado no primeiro quadro, quando já sabemos o tamanho da tela.
-        if self.encoder.is_none() {
-            let largura = frame.width();
-            let altura = frame.height();
-            println!("Capturando a tela: {}x{}", largura, altura);
-            println!("Gravando em teste-nativo.mp4 (H.264, 60 fps, 15 Mbps)...");
-
-            let encoder = VideoEncoder::new(
-                VideoSettingsBuilder::new(largura, altura)
-                    .sub_type(VideoSettingsSubType::H264)
-                    .frame_rate(60)
-                    .bitrate(15_000_000),
-                AudioSettingsBuilder::default().disabled(true),
-                ContainerSettingsBuilder::default(),
-                "teste-nativo.mp4",
-            )?;
-            self.encoder = Some(encoder);
-            self.inicio = Instant::now();
-        }
-
-        if let Some(encoder) = self.encoder.as_mut() {
-            encoder.send_frame(frame)?;
-            self.quadros += 1;
-        }
-
-        if self.inicio.elapsed().as_secs() >= 10 {
-            if let Some(encoder) = self.encoder.take() {
-                encoder.finish()?;
-            }
-            println!("Pronto. {} quadros enviados ao codificador.", self.quadros);
-            println!("Arquivo salvo: teste-nativo.mp4");
-            controle.stop();
-        }
-        Ok(())
-    }
-
-    fn on_closed(&mut self) -> Result<(), Self::Error> {
-        Ok(())
+fn perguntar(texto: &str, padrao: &str) -> String {
+    print!("{} [{}]: ", texto, padrao);
+    io::stdout().flush().ok();
+    let mut linha = String::new();
+    io::stdin().read_line(&mut linha).ok();
+    let linha = linha.trim().to_string();
+    if linha.is_empty() {
+        padrao.to_string()
+    } else {
+        linha
     }
 }
 
 fn main() {
-    let monitor = Monitor::primary().expect("Nenhum monitor encontrado");
-    let config = Settings::new(
-        monitor,
-        CursorCaptureSettings::Default,
-        DrawBorderSettings::Default,
-        ColorFormat::Rgba8,
-        (),
-    );
-    Captura::start(config).expect("A captura falhou");
+    println!("=== Motor de tela (teste v0.2) ===");
+    println!("1 = Compartilhar minha tela");
+    println!("2 = Assistir");
+    let modo = perguntar("Escolha", "1");
+
+    if modo == "2" {
+        let porta = perguntar("Porta para receber", "5000");
+        assistir::executar(&porta);
+    } else {
+        let ip = perguntar("IP do PC que vai assistir", "127.0.0.1");
+        let porta = perguntar("Porta", "5000");
+        let mbps = perguntar("Bitrate em Mbps", "8");
+        compartilhar::executar(&ip, &porta, &mbps);
+    }
+
+    println!("Encerrado. Aperte Enter para fechar.");
+    let mut x = String::new();
+    io::stdin().read_line(&mut x).ok();
 }
