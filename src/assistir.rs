@@ -15,6 +15,34 @@ struct Parcial {
     chave: bool,
 }
 
+// Converte o quadro decodificado (YUV 4:2:0) direto para pixels 0RGB, com contas de inteiros.
+fn yuv_para_pixels(
+    y: &[u8],
+    u: &[u8],
+    v: &[u8],
+    strides: (usize, usize, usize),
+    dims: (usize, usize),
+    saida: &mut [u32],
+) {
+    let (ys, us, vs) = strides;
+    let (w, h) = dims;
+    for linha in 0..h {
+        let yl = &y[linha * ys..linha * ys + w];
+        let ul = &u[(linha / 2) * us..(linha / 2) * us + w / 2];
+        let vl = &v[(linha / 2) * vs..(linha / 2) * vs + w / 2];
+        let out = &mut saida[linha * w..(linha + 1) * w];
+        for x in 0..w {
+            let c = 298 * (yl[x] as i32 - 16);
+            let d = ul[x / 2] as i32 - 128;
+            let e = vl[x / 2] as i32 - 128;
+            let r = ((c + 409 * e + 128) >> 8).clamp(0, 255) as u32;
+            let g = ((c - 100 * d - 208 * e + 128) >> 8).clamp(0, 255) as u32;
+            let b = ((c + 516 * d + 128) >> 8).clamp(0, 255) as u32;
+            out[x] = (r << 16) | (g << 8) | b;
+        }
+    }
+}
+
 // `par` = endereco do outro PC quando a conexao ja foi feita pela internet.
 // Com `None` (IP direto), o programa aprende o endereco do primeiro pacote que chegar.
 pub fn executar(socket: UdpSocket, par: Option<SocketAddr>) {
@@ -47,7 +75,6 @@ pub fn executar(socket: UdpSocket, par: Option<SocketAddr>) {
 
     let mut janela: Option<Window> = None;
     let mut dims = (0usize, 0usize);
-    let mut rgb: Vec<u8> = Vec::new();
     let mut pixels: Vec<u32> = Vec::new();
     let mut parcial: Option<Parcial> = None;
     let mut ultimo_id: Option<u32> = None;
@@ -58,6 +85,8 @@ pub fn executar(socket: UdpSocket, par: Option<SocketAddr>) {
     let mut ult_seg = Instant::now();
     let mut quadros_vistos = 0u32;
     let mut bytes_rec = 0u64;
+    let mut ms_dec = 0.0f64;
+    let mut ms_cor = 0.0f64;
 
     println!("Esperando a transmissao... (ESC na janela para sair)");
 
@@ -144,16 +173,17 @@ pub fn executar(socket: UdpSocket, par: Option<SocketAddr>) {
                 continue;
             }
 
-            match decoder.decode(&h264) {
+            let t_dec = Instant::now();
+            let resultado = decoder.decode(&h264);
+            ms_dec += t_dec.elapsed().as_secs_f64() * 1000.0;
+            match resultado {
                 Ok(Some(yuv)) => {
+                    let t_cor = Instant::now();
                     let (w, h) = yuv.dimensions();
-                    rgb.resize(w * h * 3, 0);
-                    yuv.write_rgb8(&mut rgb);
+                    let strides = yuv.strides();
                     pixels.resize(w * h, 0);
-                    for (i, px) in rgb.chunks_exact(3).enumerate() {
-                        pixels[i] =
-                            ((px[0] as u32) << 16) | ((px[1] as u32) << 8) | (px[2] as u32);
-                    }
+                    yuv_para_pixels(yuv.y(), yuv.u(), yuv.v(), strides, (w, h), &mut pixels);
+                    ms_cor += t_cor.elapsed().as_secs_f64() * 1000.0;
                     if eh_chave {
                         esperando_chave = false;
                     }
@@ -219,12 +249,16 @@ pub fn executar(socket: UdpSocket, par: Option<SocketAddr>) {
 
         if ult_seg.elapsed() >= Duration::from_secs(1) {
             println!(
-                "{} quadros/s, {:.1} Mbps recebidos",
+                "{} quadros/s, {:.1} Mbps recebidos | em 1 s: decodificar {:.0} ms, cor {:.0} ms",
                 quadros_vistos,
-                (bytes_rec as f64 * 8.0) / 1_000_000.0
+                (bytes_rec as f64 * 8.0) / 1_000_000.0,
+                ms_dec,
+                ms_cor
             );
             quadros_vistos = 0;
             bytes_rec = 0;
+            ms_dec = 0.0;
+            ms_cor = 0.0;
             ult_seg = Instant::now();
         }
     }
