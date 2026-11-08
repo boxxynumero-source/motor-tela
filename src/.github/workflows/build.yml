@@ -1,0 +1,14 @@
+name: Compilar
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: motor-tela
+          path: target/release/motor-tela.exe
