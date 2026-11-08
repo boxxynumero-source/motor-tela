@@ -1,6 +1,10 @@
 use std::time::Instant;
 use windows_capture::{
     capture::{Context, GraphicsCaptureApiHandler},
+    encoder::{
+        AudioSettingsBuilder, ContainerSettingsBuilder, VideoEncoder, VideoSettingsBuilder,
+        VideoSettingsSubType,
+    },
     frame::Frame,
     graphics_capture_api::InternalCaptureControl,
     monitor::Monitor,
@@ -8,10 +12,9 @@ use windows_capture::{
 };
 
 struct Captura {
+    encoder: Option<VideoEncoder>,
     inicio: Instant,
-    ultimo: Instant,
     quadros: u32,
-    primeiro: bool,
 }
 
 impl GraphicsCaptureApiHandler for Captura {
@@ -20,10 +23,9 @@ impl GraphicsCaptureApiHandler for Captura {
 
     fn new(_ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
         Ok(Self {
+            encoder: None,
             inicio: Instant::now(),
-            ultimo: Instant::now(),
             quadros: 0,
-            primeiro: true,
         })
     }
 
@@ -32,20 +34,37 @@ impl GraphicsCaptureApiHandler for Captura {
         frame: &mut Frame,
         controle: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
-        if self.primeiro {
-            println!("Capturando a tela: {}x{}", frame.width(), frame.height());
-            self.primeiro = false;
-        }
-        self.quadros += 1;
+        // O codificador é criado no primeiro quadro, quando já sabemos o tamanho da tela.
+        if self.encoder.is_none() {
+            let largura = frame.width();
+            let altura = frame.height();
+            println!("Capturando a tela: {}x{}", largura, altura);
+            println!("Gravando em teste-nativo.mp4 (H.264, 60 fps, 15 Mbps)...");
 
-        if self.ultimo.elapsed().as_secs_f32() >= 1.0 {
-            println!("{} quadros por segundo", self.quadros);
-            self.quadros = 0;
-            self.ultimo = Instant::now();
+            let encoder = VideoEncoder::new(
+                VideoSettingsBuilder::new(largura, altura)
+                    .sub_type(VideoSettingsSubType::H264)
+                    .frame_rate(60)
+                    .bitrate(15_000_000),
+                AudioSettingsBuilder::default().disabled(true),
+                ContainerSettingsBuilder::default(),
+                "teste-nativo.mp4",
+            )?;
+            self.encoder = Some(encoder);
+            self.inicio = Instant::now();
+        }
+
+        if let Some(encoder) = self.encoder.as_mut() {
+            encoder.send_frame(frame)?;
+            self.quadros += 1;
         }
 
         if self.inicio.elapsed().as_secs() >= 10 {
-            println!("Fim do teste de 10 segundos.");
+            if let Some(encoder) = self.encoder.take() {
+                encoder.finish()?;
+            }
+            println!("Pronto. {} quadros enviados ao codificador.", self.quadros);
+            println!("Arquivo salvo: teste-nativo.mp4");
             controle.stop();
         }
         Ok(())
